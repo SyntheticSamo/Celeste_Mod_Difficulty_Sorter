@@ -5,6 +5,7 @@ from selenium.webdriver.common.by import By
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 import csv
+import os
 from selenium.webdriver.remote.remote_connection import RemoteConnection
 
 
@@ -72,7 +73,7 @@ def extract_urls(base_url):
             response = requests.get(api_url, headers=headers)
             time.sleep(1)
             data = response.json()
-            if not data or len(data) == 0:
+            if len(data.get("_aRecords")) == 0:
                 break
             for item in data['_aRecords']:
                 if '_sProfileUrl' in item:
@@ -87,7 +88,6 @@ def extract_urls(base_url):
 
 def extract_data(driver, url, errors):
     try:
-        result = {}
         url_count = 0
         print(f"Processing {url}")
         url_count +=1
@@ -133,6 +133,14 @@ def extract_data(driver, url, errors):
         }
         errors[url] = error
         return None
+    
+
+
+def save_urls_to_csv(urls, filename = 'urls.csv'):
+    df = pd.DataFrame(urls, columns=['url'])
+    df.to_csv(filename, index=False, encoding='utf-8')
+    print(f"URLs saved to {filename}")
+    
 
 
 
@@ -154,13 +162,7 @@ def save_to_csv(results, filename = 'gamebanana_data.csv'):
 
 
 
-def save_errors_to_csv(errors, filename = 'gamebanana_errors.csv'):
-
-    print("Errors dictionary structure:")  
-    for url, error_data in errors.items():  
-        print(f"URL: {url}")  
-        print(f"Error data: {error_data}")
-
+def save_errors_to_csv(errors, filename = 'errors.csv'):
     error_rows = []  
     for url, error_info in errors.items():  
         error_rows.append({  
@@ -172,14 +174,67 @@ def save_errors_to_csv(errors, filename = 'gamebanana_errors.csv'):
     print(f"Errors saved to {filename}")
 
 
+def retry_failed_urls(driver, results, errors, max_retries=5):  
+    error_file = 'errors.csv'
+    error_df = pd.read_csv(error_file)
+    retry_urls = error_df['url'].tolist()
+    if not retry_urls:
+        print('No failed URLs found')
+        return
+    print(f'Found {len(retry_urls)} failed URLs')
+
+    for i in range(max_retries):
+        remaining_urls = []
+        for url in retry_urls:
+            result = extract_data(driver, url, errors)  
+            if result:  
+                error_df = error_df[error_df['url'] != url]
+                error_df.to_csv(error_file, index=False)
+                print(f"success: {url}")  
+                results.append(result)
+                if url in errors:
+                    del errors[url]
+            else:  
+                print(f"failed: {url}")  
+                remaining_urls.append(url)
+        retry_urls = remaining_urls
+        if not retry_urls:
+            print('All URLs processed successfully')
+            break  
+        elif i < max_retries - 1:
+            print(f'maximum retries reached, {len(retry_urls)} URLs still have errors')
+    if errors:
+        save_errors_to_csv(errors, 'data.csv')
+        
+    return driver, results, errors
+    
+
+
+
 
 def main():
-    errors = {}
     base_url = "https://gamebanana.com/apiv11/Mod/Index?_nPerpage=15&_aFilters%5BGeneric_Category%5D=6801"
     driver = init_driver()
-    urls = extract_urls(base_url)
     results = []
-    print(f"Found {len(urls)} urls")
+    errors = {}
+    only_retry = input("Retry failed URLs only? (y/n): ")
+    if only_retry.lower() == 'y':
+        driver, retry_results, retry_errors = retry_failed_urls(driver, results, errors)
+        save_to_csv(retry_results)
+        errors.update(retry_errors)
+        return
+
+    url_complete = input("URL search complete? (y/n): ")
+    if url_complete.lower() == 'n':
+        urls = extract_urls(base_url)
+        print(f"Found {len(urls)} urls")
+        save_urls_to_csv(urls) 
+    elif url_complete.lower() == 'y':
+        urls = pd.read_csv('urls.csv')['url'].tolist() 
+    else:
+        print("Invalid input")
+        return
+
     for url in urls:
         result = extract_data(driver, url, errors)
         if result:
@@ -193,8 +248,13 @@ def main():
         print("Failed URLs:")
         for url in errors:
             print(url)
+        if os.path.exists('errors.csv'):  
+            print("Found failed URLs, starting retry...")  
+            driver, retry_results, retry_errors = retry_failed_urls(driver)  
+            save_to_csv(retry_results)    
+            errors.update(retry_errors) 
     else:
-        print("All URLs processed successfully.")
+        print("All URLs processed successfully.") 
     driver.quit()
 
 
