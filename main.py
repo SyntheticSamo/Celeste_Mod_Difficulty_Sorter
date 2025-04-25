@@ -7,6 +7,8 @@ from selenium.webdriver.chrome.options import Options
 import csv
 import os
 from selenium.webdriver.remote.remote_connection import RemoteConnection
+import shutil
+import json
 
 
 def init_driver():
@@ -39,12 +41,12 @@ def init_driver():
 
 def diff_analysis(description):
     diff_keywords = {
-        'Beginner': ['beginner', 'basic', 'novice', 'starter', 'easy', '7a', 'chapter 7'],
-        'Intermediate': ['intermediate', 'medium', 'moderate', 'vanilla celeste', 'completed Farewell', 'actual farewell'],
-        'Advanced': ['advanced'],
-        'Expert': ['expert'],
-        'Grandmaster': ['grandmaster', 'gm'],
-        'GM+' : ['gm+', 'very challenging', 'chaotic', 'grandmaster+'],
+        'beginner': ['beginner', 'basic', 'novice', 'starter', 'easy', '7a', 'chapter 7'],
+        'intermediate': ['intermediate', 'medium', 'moderate', 'vanilla celeste', 'completed Farewell', 'actual farewell'],
+        'advanced': ['advanced'],
+        'expert': ['expert'],
+        'grandmaster': ['grandmaster', 'gm'],
+        'gm+' : ['gm+', 'very challenging', 'chaotic', 'grandmaster+'],
     }
     found_words = set()
     description_lower = description.lower()
@@ -53,7 +55,7 @@ def diff_analysis(description):
             if keyword.lower() in description_lower:
                 found_words.add(difficulty)
     if not found_words:
-        found_words.add('No difficulty available')
+        found_words.add('no difficulty available')
     return found_words
 
 
@@ -86,9 +88,8 @@ def extract_urls(base_url):
     return urls
 
 
-def extract_data(driver, url, errors):
+def extract_data(df, driver, url, errors, url_count = 0, TimeoutTimes = 0):
     try:
-        url_count = 0
         print(f"Processing {url}")
         url_count +=1
         if url_count % 30 == 0:
@@ -105,25 +106,41 @@ def extract_data(driver, url, errors):
             alert.dismiss()  
         except:  
             pass  
-
-        try:
-            print("Trying XPATH")
-            element = driver.find_element(By.XPATH, '//*[@id="ItemProfileModule"]/div/article')
-        except Exception as e:
-            try:
-                element = driver.find_element(By.CLASS_NAME, 'RichText')  
-                print(f"XPATH failed, trying CLASS_NAME: {str(e)}")
-            except Exception as e:
-                print(f"Both XPATH and CLASS_NAME failed: {str(e)}")
+        print("Trying XPATH")
+        element = driver.find_element(By.XPATH, '//*[@id="ItemProfileModule"]/div/article')
         description = element.get_attribute('textContent')
-        print(f"success: {driver.title}.replace(' [Celeste] [Mods]', '')")
+        download_element = driver.find_element(By.XPATH, '//*[@id="StatsModule"]/div/ul')
+        download_li = download_element.find_element(By.XPATH, './/li[@class="DownloadCount CountStat"]')
+        download = download_li.find_element(By.XPATH, './/itemcount').text
+        print(f"success: {driver.title}")
         result = {
             'url': url,
             'title': driver.title.replace(' [Celeste] [Mods]', ''),
             'description': description,
-            'diffculties': list(diff_analysis(description))
+            'diffculties': list(diff_analysis(description)),
+            'download' : download
         }
-        return result
+        if result:
+            df = df[df['url'] != url]
+            df.to_csv('urls.csv', index=False)
+        return result, driver
+    except TimeoutError:
+        print(f"Timeout error processing {url}")
+        TimeoutTimes += 1
+        if TimeoutTimes > 5:
+            driver.quit()
+            time.sleep(5)
+            driver = init_driver()
+            print("Restarting browser after 5 timeouts")
+            TimeoutTimes = 0
+
+        error = {
+            'url': url,
+            'error': 'TimeoutError',
+        }
+        errors[url] = error
+        return None, driver
+
     
     except Exception as e:
         print(f"Error processing {url}: {str(e)}")
@@ -132,7 +149,7 @@ def extract_data(driver, url, errors):
             'error': str(e),
         }
         errors[url] = error
-        return None
+        return None, driver
     
 
 
@@ -152,7 +169,8 @@ def save_to_csv(results, filename = 'gamebanana_data.csv'):
                 'url': result['url'],
                 'title': result['title'],
                 'description': result['description'],
-                'diffculties': '|'.join(result['diffculties'])
+                'diffculties': '|'.join(result['diffculties']),
+                'download': result['download']
             })
     df = pd.DataFrame(csv_data)
     df.to_csv(filename, index=False, encoding='utf-8',
@@ -186,7 +204,7 @@ def retry_failed_urls(driver, results, errors, max_retries=5):
     for i in range(max_retries):
         remaining_urls = []
         for url in retry_urls:
-            result = extract_data(driver, url, errors)  
+            result = extract_data(error_df, driver, url, errors)  
             if result:  
                 error_df = error_df[error_df['url'] != url]
                 error_df.to_csv(error_file, index=False)
@@ -204,7 +222,7 @@ def retry_failed_urls(driver, results, errors, max_retries=5):
         elif i < max_retries - 1:
             print(f'maximum retries reached, {len(retry_urls)} URLs still have errors')
     if errors:
-        save_errors_to_csv(errors, 'data.csv')
+        save_errors_to_csv(errors, 'errors.csv')
         
     return driver, results, errors
     
@@ -229,18 +247,23 @@ def main():
         urls = extract_urls(base_url)
         print(f"Found {len(urls)} urls")
         save_urls_to_csv(urls) 
+        shutil.copyfile('urls.csv', 'urls_backup.csv')
+
     elif url_complete.lower() == 'y':
         urls = pd.read_csv('urls.csv')['url'].tolist() 
     else:
         print("Invalid input")
         return
 
+    urls_df = pd.read_csv('urls.csv')
     for url in urls:
-        result = extract_data(driver, url, errors)
+        result = extract_data(urls_df, driver, url, errors)
         if result:
             results.append(result)
-    save_to_csv(results)
-    save_errors_to_csv(errors)
+            save_to_csv(results)
+        else:
+            save_errors_to_csv(errors)
+            
     print("\nProcessing Summary:")  
     print(f"Total URLs processed: {len(results)}")  
     print(f"Total URLs with errors: {len(errors)}")
